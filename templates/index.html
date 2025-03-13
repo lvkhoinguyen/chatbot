@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chatbot Application</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <script src="{{ url_for('static', filename='js/scripts.js') }}" defer></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Welcome to the Chatbot Application</h1>
+        </header>
+        <main>
+            <section id="chatbot-interface">
+                <div id="chat-window">
+                    <!-- Chat messages will be displayed here -->
+                </div>
+                <input type="text" id="user-input" placeholder="Type your question here...">
+                <button id="send-button">Send</button>
+            </section>
+        </main>
+        <footer>
+            <p>&copy; 2023 Chatbot Application</p>
+        </footer>
+    </div>
+</body>
+</html>
