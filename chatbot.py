@@ -5,6 +5,13 @@ import faiss
 import google.generativeai as genai
 import time
 import spacy  # Add this import
+import fitz  # PyMuPDF
+import re
+
+from pdf_processing import extract_text_from_pdf
+from text_chunking import split_text_into_chunks
+from qa_model import create_embeddings_with_cache, find_relevant_chunks_with_cache, re_rank_chunks
+from entity_extraction import extract_entities
 
 # Cấu hình API key của Gemini
 genai.configure(api_key="api")
@@ -12,45 +19,6 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Load spaCy model
 nlp = spacy.load("en_core_web_sm")
-
-# Hàm trích xuất nội dung từ file PDF
-def extract_text_from_pdf(pdf_file):
-    pdf_reader = PyPDF2.PdfReader(pdf_file)
-    extracted_text = ""
-    for page in pdf_reader.pages:
-        text = page.extract_text()
-        if text:
-            extracted_text += text
-    return extracted_text
-
-# Chia văn bản thành các đoạn nhỏ
-def split_text_into_chunks(text, chunk_size=1000):
-    chunks = []
-    for i in range(0, len(text), chunk_size):
-        chunks.append(text[i:i + chunk_size])  # Fixed the indexing here
-    return chunks
-
-# Tạo embeddings cho các đoạn văn bản và tìm đoạn liên quan bằng FAISS
-def find_relevant_chunks(question, chunks, model, top_n=3):
-    # Tạo embeddings
-    chunk_embeddings = model.encode(chunks)
-    question_embedding = model.encode([question])
-
-    # Xây dựng FAISS index
-    dimension = chunk_embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
-    index.add(chunk_embeddings)
-
-    # Tìm kiếm top N đoạn liên quan
-    _, top_indices = index.search(question_embedding, top_n)
-    relevant_chunks = [chunks[i] for i in top_indices[0]]
-    return relevant_chunks
-
-# Hàm trích xuất thực thể từ văn bản
-def extract_entities(text):
-    doc = nlp(text)
-    entities = [(ent.text, ent.label_) for ent in doc.ents]
-    return entities
 
 # Hỏi mô hình Gemini với ngữ cảnh
 def ask_gemini(question, context=None, history=None):
@@ -61,7 +29,7 @@ def ask_gemini(question, context=None, history=None):
 
     prompt = f"""
     Bạn là một trợ lý hữu ích. Trả lời câu hỏi dựa trên ngữ cảnh và lịch sử hội thoại đã cung cấp.
-    Nếu ngữ cảnh không chứa thông tin cần thiết để trả lời câu hỏi, hãy nói "Tôi không biết."
+    "
 
     Lịch sử hội thoại:
     {history_text}
@@ -116,7 +84,89 @@ def ask_gemini_with_thoughts(question, context=None, history=None):
     final_response = model.generate_content(final_prompt)
     final_answer = final_response.text
 
+    # Check if the answer contains "Tôi không biết"
+    if "Tôi không biết" in final_answer:
+        # Ask Gemini directly without context
+        direct_prompt = f"""
+        Bạn là một trợ lý hữu ích. Trả lời câu hỏi sau mà không cần ngữ cảnh.
+
+        Câu hỏi: {question}
+        """
+        direct_response = model.generate_content(direct_prompt)
+        final_answer = direct_response.text
+
     return thought_process, final_answer
+
+# Hỏi mô hình GPT với prompt được định dạng hợp lý
+def ask_gpt_with_prompt(question, relevant_chunks, history=None):
+    """
+    Gửi câu hỏi và các đoạn văn bản liên quan đến GPT với prompt được định dạng hợp lý.
+
+    Args:
+        question (str): Câu hỏi của người dùng.
+        relevant_chunks (list): Các đoạn văn bản liên quan.
+        history (list): Lịch sử hội thoại (nếu có).
+
+    Returns:
+        str: Câu trả lời từ GPT.
+    """
+    history_text = ""
+    if history:
+        for q, a in history:
+            history_text += f"Q: {q}\nA: {a}\n"
+
+    # Định dạng prompt
+    context_text = "\n\n".join([f"[Đoạn {i+1}] {chunk}" for i, chunk in enumerate(relevant_chunks)])
+    prompt = f"""
+    Dưới đây là các đoạn thông tin trích từ tài liệu:
+    {context_text}
+
+    Câu hỏi: {question}
+    Trả lời dựa trên nội dung trên:
+    Nếu không có thông tin trong tài liệu, hãy trả lời là 'Tôi không chắc chắn'.
+    """
+
+    # Gửi prompt đến GPT
+    response = model.generate_content(prompt)
+    return response.text
+
+# Hỏi mô hình GPT với ngữ cảnh hội thoại
+
+def ask_gpt_with_context(question, relevant_chunks, history=None):
+    """
+    Gửi câu hỏi và các đoạn văn bản liên quan đến GPT với ngữ cảnh hội thoại.
+
+    Args:
+        question (str): Câu hỏi của người dùng.
+        relevant_chunks (list): Các đoạn văn bản liên quan.
+        history (list): Lịch sử hội thoại (nếu có).
+
+    Returns:
+        str: Câu trả lời từ GPT.
+    """
+    # Định dạng lịch sử hội thoại
+    history_text = ""
+    if history:
+        for i, (q, a) in enumerate(history):
+            history_text += f"Turn {i+1}:\nQ: {q}\nA: {a}\n\n"
+
+    # Định dạng prompt
+    context_text = "\n\n".join([f"[Đoạn {i+1}] {chunk}" for i, chunk in enumerate(relevant_chunks)])
+    prompt = f"""
+    Dưới đây là các đoạn thông tin trích từ tài liệu:
+    {context_text}
+
+    Lịch sử hội thoại:
+    {history_text}
+
+    Câu hỏi hiện tại: {question}
+    Trả lời dựa trên nội dung trên và lịch sử hội thoại:
+    Nếu không có thông tin trong tài liệu, hãy trả lời là 'Tôi không chắc chắn'.
+    """
+
+    # Gửi prompt đến GPT
+    response = model.generate_content(prompt)
+    return response.text
 
 # Giao diện Streamlit
 st.set_page_config(page_title="Hỏi Đáp với Gemini - RAG", layout="wide")
@@ -161,32 +211,23 @@ with col1:
             for chunks in st.session_state.pdf_contents.values():
                 all_chunks.extend(chunks)
 
-            # Sử dụng mô hình Sentence Transformers để tạo embeddings
-            embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            relevant_chunks = find_relevant_chunks(question, all_chunks, embedding_model)
+            # Tạo embedding cho các đoạn văn
+            embedding_model_name = 'all-MiniLM-L6-v2'
+            embeddings, embedding_model = create_embeddings_with_cache(all_chunks, embedding_model_name)
+
+            # Tìm các đoạn liên quan nhất
+            relevant_chunks = find_relevant_chunks_with_cache(question, all_chunks, embeddings, embedding_model)
             combined_context = " ".join(relevant_chunks)
 
-            # Show "Thinking..." indicator
-            st.info("Gemini đang suy nghĩ...")
-
-            # Hỏi mô hình Gemini với suy nghĩ
-            thought_process, final_answer = ask_gemini_with_thoughts(question, combined_context, st.session_state.conversation_history)
+            # Gửi câu hỏi và ngữ cảnh vào GPT để tạo câu trả lời
+            final_answer = ask_gemini(question, combined_context, st.session_state.conversation_history)
 
             # Lưu câu hỏi và câu trả lời vào lịch sử
             st.session_state.conversation_history.append((question, final_answer))
 
-            # Hiển thị suy nghĩ và câu trả lời
-            st.markdown(f"<div style='background-color: #fff; padding: 15px; border-radius: 10px;'><b>Suy nghĩ của Gemini:</b><br>{thought_process}</div>",
-                        unsafe_allow_html=True)
+            # Hiển thị câu trả lời
             st.markdown(f"<div style='background-color: #fff; padding: 15px; border-radius: 10px;'><b>Trả lời:</b><br>{final_answer}</div>",
                         unsafe_allow_html=True)
-
-            # Extract and display named entities
-            entities = extract_entities(final_answer)
-            if entities:
-                st.markdown("<b>Thực thể được nhận dạng:</b>", unsafe_allow_html=True)
-                for entity, label in entities:
-                    st.markdown(f"- **{entity}**: {label}", unsafe_allow_html=True)
 
 with col2:
     if st.checkbox("Hiển thị nội dung các file PDF"):
